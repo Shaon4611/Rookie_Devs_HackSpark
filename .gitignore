@@ -25,7 +25,11 @@ obj/
 *.env
 
 # Docker
-.dockerignore
+!api-gateway/.dockerignore
+!user-service/.dockerignore
+!rental-service/.dockerignore
+!analytics-service/.dockerignore
+!agentic-service/.dockerignore
 
 # OS
 .DS_Store

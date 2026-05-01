@@ -1,60 +1,180 @@
-name: RentPi
-
-# N.B. You can change this according to your need
+name: hackspark-microservices
 
 services:
-
-  # ── Infrastructure ──────────────────────────────────────────────────────────
-
   postgres:
     image: postgres:16-alpine
+    container_name: hackspark-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER:     ${POSTGRES_USER:-rentpi}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localpassword}
-      POSTGRES_DB:       ${POSTGRES_DB:-rentpi_local}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+      POSTGRES_USER: ${POSTGRES_USER:-hackspark}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hackspark_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hackspark}
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rentpi} -d ${POSTGRES_DB:-rentpi_local}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
-      - rentpi-net
+      - hackspark-net
 
   mongodb:
     image: mongo:7-jammy
+    container_name: hackspark-mongodb
     restart: unless-stopped
-    volumes:
-      - mongo_data:/data/db
     ports:
       - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
-      - rentpi-net
+      - hackspark-net
 
-  # ── Application Services ────────────────────────────────────────────────────
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: hackspark-user-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8001
+      DATABASE_URL: postgres://${POSTGRES_USER:-hackspark}:${POSTGRES_PASSWORD:-hackspark_password}@postgres:5432/${POSTGRES_DB:-hackspark}
+      JWT_SECRET: ${JWT_SECRET:-development_jwt_secret_change_me}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN:-}
+      CENTRAL_API_USERS_URL: https://technocracy.brittoo.xyz/api/data/users
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8001/status').then((response) => response.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hackspark-net
+
+  rental-service:
+    build:
+      context: ./rental-service
+      dockerfile: Dockerfile
+    container_name: hackspark-rental-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8002
+      USER_SERVICE_URL: http://user-service:8001
+      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN:-}
+      CENTRAL_API_PRODUCTS_URL: https://technocracy.brittoo.xyz/api/data/products
+      CENTRAL_API_CATEGORIES_URL: https://technocracy.brittoo.xyz/api/data/categories
+      CENTRAL_API_RENTALS_URL: https://technocracy.brittoo.xyz/api/data/rentals
+      CENTRAL_API_RENTAL_STATS_URL: https://technocracy.brittoo.xyz/api/data/rentals/stats
+      CENTRAL_API_PRODUCTS_BATCH_URL: https://technocracy.brittoo.xyz/api/data/products/batch
+    ports:
+      - "8002:8002"
+    depends_on:
+      user-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8002/status').then((response) => response.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hackspark-net
+
+  analytics-service:
+    build:
+      context: ./analytics-service
+      dockerfile: Dockerfile
+    container_name: hackspark-analytics-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8003
+      DATABASE_URL: postgres://${POSTGRES_USER:-hackspark}:${POSTGRES_PASSWORD:-hackspark_password}@postgres:5432/${POSTGRES_DB:-hackspark}
+      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN:-}
+      CENTRAL_API_RENTAL_STATS_URL: https://technocracy.brittoo.xyz/api/data/rentals/stats
+      CENTRAL_API_RENTALS_URL: https://technocracy.brittoo.xyz/api/data/rentals
+      CENTRAL_API_PRODUCTS_BATCH_URL: https://technocracy.brittoo.xyz/api/data/products/batch
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8003/status').then((response) => response.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hackspark-net
+
+  agentic-service:
+    build:
+      context: ./agentic-service
+      dockerfile: Dockerfile
+    container_name: hackspark-agentic-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8004
+      MONGO_URI: mongodb://mongodb:27017/hackspark
+      ANALYTICS_SERVICE_URL: http://analytics-service:8003
+      RENTAL_SERVICE_URL: http://rental-service:8002
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    ports:
+      - "8004:8004"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+      rental-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8004/status').then((response) => response.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hackspark-net
 
   api-gateway:
     build:
       context: ./api-gateway
       dockerfile: Dockerfile
+    container_name: hackspark-api-gateway
     restart: unless-stopped
-    ports:
-      - "${GATEWAY_PORT:-8000}:8000"
     environment:
-      PORT:                  8000
-      USER_SERVICE_URL:      http://user-service:8001
-      RENTAL_SERVICE_URL:    http://rental-service:8002
+      NODE_ENV: production
+      PORT: 8000
+      USER_SERVICE_URL: http://user-service:8001
+      RENTAL_SERVICE_URL: http://rental-service:8002
       ANALYTICS_SERVICE_URL: http://analytics-service:8003
-      AGENTIC_SERVICE_URL:   http://agentic-service:8004
+      AGENTIC_SERVICE_URL: http://agentic-service:8004
+    ports:
+      - "8000:8000"
     depends_on:
       user-service:
         condition: service_healthy
@@ -65,137 +185,18 @@ services:
       agentic-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/status || exit 1"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/status').then((response) => response.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 10s
     networks:
-      - rentpi-net
+      - hackspark-net
 
-  user-service:
-    build:
-      context: ./user-service
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${USER_SERVICE_PORT:-8001}:8001"
-    environment:
-      PORT:              8001
-      DATABASE_URL:      ${DATABASE_URL}
-      JWT_SECRET:        ${JWT_SECRET}
-      CENTRAL_API_URL:   ${CENTRAL_API_URL}
-      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/status || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks:
-      - rentpi-net
-
-  rental-service:
-    build:
-      context: ./rental-service
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${RENTAL_SERVICE_PORT:-8002}:8002"
-    environment:
-      PORT:              8002
-      CENTRAL_API_URL:   ${CENTRAL_API_URL}
-      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN}
-      USER_SERVICE_URL:  http://user-service:8001
-    depends_on:
-      user-service:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8002/status || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks:
-      - rentpi-net
-
-  analytics-service:
-    build:
-      context: ./analytics-service
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${ANALYTICS_SERVICE_PORT:-8003}:8003"
-    environment:
-      PORT:              8003
-      CENTRAL_API_URL:   ${CENTRAL_API_URL}
-      CENTRAL_API_TOKEN: ${CENTRAL_API_TOKEN}
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8003/status || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks:
-      - rentpi-net
-
-  agentic-service:
-    build:
-      context: ./agentic-service
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${AGENTIC_SERVICE_PORT:-8004}:8004"
-    environment:
-      PORT:                  8004
-      MONGO_URI:             ${MONGO_URI}
-      CENTRAL_API_URL:       ${CENTRAL_API_URL}
-      CENTRAL_API_TOKEN:     ${CENTRAL_API_TOKEN}
-      GEMINI_API_KEY:        ${GEMINI_API_KEY:-}
-      ANALYTICS_SERVICE_URL: http://analytics-service:8003
-      RENTAL_SERVICE_URL:    http://rental-service:8002
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      analytics-service:
-        condition: service_healthy
-      rental-service:        
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8004/status || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks:
-      - rentpi-net
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${FRONTEND_PORT:-3000}:3000"
-    environment:
-      VITE_GATEWAY_URL:        http://localhost:8000
-      NEXT_PUBLIC_GATEWAY_URL: http://localhost:8000
-      GATEWAY_URL_INTERNAL:    http://api-gateway:8000 
-    depends_on:
-      api-gateway:
-        condition: service_healthy
-    healthcheck:                                     
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-    networks:
-      - rentpi-net
-
-# ── Named Volumes ─────────────────────────────────────────────────────────────
 volumes:
   postgres_data:
   mongo_data:
 
-# ── Network ───────────────────────────────────────────────────────────────────
 networks:
-  rentpi-net:
+  hackspark-net:
     driver: bridge

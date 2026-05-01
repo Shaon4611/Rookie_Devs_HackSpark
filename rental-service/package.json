@@ -1,0 +1,14 @@
+{
+  "name": "rental-service",
+  "version": "1.0.0",
+  "description": "Rental service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "express": "^4.21.2"
+  }
+}
