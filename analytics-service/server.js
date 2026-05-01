@@ -2,6 +2,19 @@ const express = require("express");
 const axios = require("axios");
 const dateFns = require("date-fns");
 const { withRetry, handleRetryExhausted } = require("./api-retry-utils");
+const grpc = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
+const path = require('path');
+
+const PROTO_PATH = path.join(__dirname, 'rentpi.proto');
+const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true
+});
+const rentpiProto = grpc.loadPackageDefinition(packageDefinition).rentpi;
 
 const app = express();
 const PORT = process.env.PORT || 8003;
@@ -390,465 +403,91 @@ function buildSurgeDays(dailyCounts) {
   return data;
 }
 
-function parseDateInput(value) {
-  if (typeof value !== "string" || !DATE_PATTERN.test(value)) {
-    return null;
-  }
-
-  const parsed = dateFns.parse(value, "yyyy-MM-dd", new Date());
-
-  if (!dateFns.isValid(parsed) || dateFns.format(parsed, "yyyy-MM-dd") !== value) {
-    return null;
-  }
-
-  return dateFns.startOfDay(parsed);
-}
-
 function formatDateInput(date) {
   return dateFns.format(date, "yyyy-MM-dd");
 }
 
-function parseRecommendationLimit(value) {
-  if (value === undefined || value === null || value === "") {
-    return DEFAULT_RECOMMENDATION_LIMIT;
+async function getRecommendationsLogic(date, limit) {
+  if (!date || isNaN(new Date(date))) {
+    throw new Error("Invalid date format");
   }
 
-  const limit = Number(value);
-
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_RECOMMENDATION_LIMIT) {
-    return null;
+  const lim = parseInt(limit) || DEFAULT_RECOMMENDATION_LIMIT;
+  if (lim <= 0 || lim > 50) {
+    throw new Error("Invalid limit");
   }
 
-  return limit;
-}
+  const base = new Date(date);
+  const start = new Date(base);
+  start.setDate(base.getDate() - 7);
+  const end = new Date(base);
+  end.setDate(base.getDate() + 7);
 
-function normalizeDateValue(value) {
-  if (!value) {
-    return null;
-  }
-
-  if (value instanceof Date) {
-    return dateFns.isValid(value) ? dateFns.startOfDay(value) : null;
-  }
-
-  if (typeof value === "number") {
-    const parsedNumberDate = new Date(value);
-    return dateFns.isValid(parsedNumberDate) ? dateFns.startOfDay(parsedNumberDate) : null;
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-
-    if (DATE_PATTERN.test(trimmed)) {
-      return parseDateInput(trimmed);
-    }
-
-    const parsedIsoDate = dateFns.parseISO(trimmed);
-    return dateFns.isValid(parsedIsoDate) ? dateFns.startOfDay(parsedIsoDate) : null;
-  }
-
-  return null;
-}
-
-function getRentalProductId(rental) {
-  if (!rental || typeof rental !== "object") {
-    return "";
-  }
-
-  const value =
-    rental.product_id ||
-    rental.productId ||
-    rental.productID ||
-    rental.product ||
-    rental.item_id ||
-    rental.itemId ||
-    rental.asset_id ||
-    rental.assetId ||
-    rental.listing_id ||
-    rental.listingId ||
-    "";
-
-  if (value && typeof value === "object") {
-    return String(value.id || value._id || value.product_id || value.productId || "");
-  }
-
-  return String(value || "");
-}
-
-function getRentalDateRange(rental) {
-  if (!rental || typeof rental !== "object") {
-    return null;
-  }
-
-  const startValue =
-    rental.date ||
-    rental.day ||
-    rental.from ||
-    rental.start ||
-    rental.start_date ||
-    rental.startDate ||
-    rental.rental_date ||
-    rental.rentalDate ||
-    rental.rental_start ||
-    rental.rentalStart ||
-    rental.booking_start ||
-    rental.bookingStart ||
-    rental.rented_from ||
-    rental.rentedFrom ||
-    rental.pickup_date ||
-    rental.pickupDate ||
-    rental.created_at ||
-    rental.createdAt;
-
-  const endValue =
-    rental.to ||
-    rental.end ||
-    rental.end_date ||
-    rental.endDate ||
-    rental.rental_end ||
-    rental.rentalEnd ||
-    rental.booking_end ||
-    rental.bookingEnd ||
-    rental.rented_to ||
-    rental.rentedTo ||
-    rental.return_date ||
-    rental.returnDate ||
-    startValue;
-
-  const start = normalizeDateValue(startValue);
-  const end = normalizeDateValue(endValue);
-
-  if (!start || !end) {
-    return null;
-  }
-
-  if (dateFns.isAfter(start, end)) {
-    return null;
-  }
-
-  return {
-    start,
-    end
-  };
-}
-
-function rangesOverlap(startA, endA, startB, endB) {
-  return !dateFns.isAfter(startA, endB) && !dateFns.isBefore(endA, startB);
-}
-
-function getSeasonalCenterForYear(targetDate, year) {
-  const monthIndex = dateFns.getMonth(targetDate);
-  const targetDay = dateFns.getDate(targetDate);
-  const daysInTargetMonth = dateFns.getDaysInMonth(new Date(year, monthIndex, 1));
-
-  return dateFns.startOfDay(new Date(year, monthIndex, Math.min(targetDay, daysInTargetMonth)));
-}
-
-function buildSeasonalWindows(targetDate, historyStart, historyEnd) {
-  const windows = [];
-  const startYear = dateFns.getYear(historyStart) - 1;
-  const endYear = dateFns.getYear(historyEnd) + 1;
-
-  for (let year = startYear; year <= endYear; year += 1) {
-    const center = getSeasonalCenterForYear(targetDate, year);
-    const windowStart = dateFns.startOfDay(dateFns.subDays(center, RECOMMENDATION_WINDOW_DAYS));
-    const windowEnd = dateFns.startOfDay(dateFns.addDays(center, RECOMMENDATION_WINDOW_DAYS));
-
-    if (rangesOverlap(windowStart, windowEnd, historyStart, historyEnd)) {
-      windows.push({
-        from: dateFns.max([windowStart, historyStart]),
-        to: dateFns.min([windowEnd, historyEnd])
-      });
-    }
-  }
-
-  return windows;
-}
-
-function rentalOverlapsSeasonalWindows(rentalRange, seasonalWindows) {
-  return seasonalWindows.some((window) =>
-    rangesOverlap(rentalRange.start, rentalRange.end, window.from, window.to)
-  );
-}
-
-function createCentralApiError(response, fallbackMessage) {
-  const error = new Error(fallbackMessage);
-
-  if (response.status === 429) {
-    error.message = "Central API rate limit exceeded";
-    error.statusCode = 429;
-    return error;
-  }
-
-  if (response.status >= 500) {
-    error.message = "Central API service error";
-    error.statusCode = 502;
-    return error;
-  }
-
-  error.statusCode = response.status;
-  error.payload = response.data;
-  return error;
-}
-
-async function fetchRentalsPage(params) {
-  const response = await centralApi.get(CENTRAL_API_RENTALS_URL, {
-    headers: buildHeaders(),
-    params
-  });
-
-  if (response.status < 200 || response.status >= 300) {
-    throw createCentralApiError(response, "Unable to fetch rentals");
-  }
-
-  return response.data;
-}
-
-async function fetchRentalsForRecommendation(historyStart, historyEnd) {
-  const limit = 100;
-  const firstPagePayload = await fetchRentalsPage({
-    from: formatDateInput(historyStart),
-    to: formatDateInput(historyEnd),
-    page: 1,
-    limit
-  });
-  const rentals = firstArrayFromPayload(firstPagePayload);
-  const totalPages = getTotalPagesFromPayload(firstPagePayload);
-
-  if (!Number.isFinite(totalPages) || totalPages <= 1) {
-    return rentals;
-  }
-
-  const pageRequests = [];
-
-  for (let page = 2; page <= totalPages; page += 1) {
-    pageRequests.push(
-      fetchRentalsPage({
-        from: formatDateInput(historyStart),
-        to: formatDateInput(historyEnd),
-        page,
-        limit
-      })
-    );
-  }
-
-  const pages = await Promise.all(pageRequests);
-
-  for (const pagePayload of pages) {
-    rentals.push(...firstArrayFromPayload(pagePayload));
-  }
-
-  return rentals;
-}
-
-function countProductsForSeasonalWindow(rentals, seasonalWindows) {
-  const counts = new Map();
-
-  for (const rental of rentals) {
-    const productId = getRentalProductId(rental);
-    const rentalRange = getRentalDateRange(rental);
-
-    if (!productId || !rentalRange) {
-      continue;
-    }
-
-    if (rentalOverlapsSeasonalWindows(rentalRange, seasonalWindows)) {
-      counts.set(productId, (counts.get(productId) || 0) + 1);
-    }
-  }
-
-  return counts;
-}
-
-class MinHeap {
-  constructor(compare) {
-    this.items = [];
-    this.compare = compare;
-  }
-
-  size() {
-    return this.items.length;
-  }
-
-  peek() {
-    return this.items[0];
-  }
-
-  push(item) {
-    this.items.push(item);
-    this.bubbleUp(this.items.length - 1);
-  }
-
-  pop() {
-    if (this.items.length === 0) {
-      return null;
-    }
-
-    if (this.items.length === 1) {
-      return this.items.pop();
-    }
-
-    const root = this.items[0];
-    this.items[0] = this.items.pop();
-    this.bubbleDown(0);
-    return root;
-  }
-
-  bubbleUp(index) {
-    let currentIndex = index;
-
-    while (currentIndex > 0) {
-      const parentIndex = Math.floor((currentIndex - 1) / 2);
-
-      if (this.compare(this.items[currentIndex], this.items[parentIndex]) >= 0) {
-        break;
-      }
-
-      [this.items[currentIndex], this.items[parentIndex]] = [
-        this.items[parentIndex],
-        this.items[currentIndex]
-      ];
-      currentIndex = parentIndex;
-    }
-  }
-
-  bubbleDown(index) {
-    let currentIndex = index;
-
+  const rentals = [];
+  const fetchRange = async (fromDate, toDate) => {
+    let page = 1;
     while (true) {
-      const leftIndex = currentIndex * 2 + 1;
-      const rightIndex = currentIndex * 2 + 2;
-      let smallestIndex = currentIndex;
-
-      if (
-        leftIndex < this.items.length &&
-        this.compare(this.items[leftIndex], this.items[smallestIndex]) < 0
-      ) {
-        smallestIndex = leftIndex;
-      }
-
-      if (
-        rightIndex < this.items.length &&
-        this.compare(this.items[rightIndex], this.items[smallestIndex]) < 0
-      ) {
-        smallestIndex = rightIndex;
-      }
-
-      if (smallestIndex === currentIndex) {
-        break;
-      }
-
-      [this.items[currentIndex], this.items[smallestIndex]] = [
-        this.items[smallestIndex],
-        this.items[currentIndex]
-      ];
-      currentIndex = smallestIndex;
+      const resApi = await centralApi.get(CENTRAL_API_RENTALS_URL, {
+        headers: buildHeaders(),
+        params: {
+          from: formatDateInput(fromDate),
+          to: formatDateInput(toDate),
+          page,
+          limit: 100
+        }
+      });
+      const pageData = firstArrayFromPayload(resApi.data);
+      rentals.push(...pageData);
+      const totalPages = getTotalPagesFromPayload(resApi.data) || 1;
+      if (page >= totalPages) break;
+      page++;
     }
+  };
+
+  for (let i = 1; i <= 2; i++) {
+    const s = new Date(start);
+    const e = new Date(end);
+    s.setFullYear(base.getFullYear() - i);
+    e.setFullYear(base.getFullYear() - i);
+    await fetchRange(s, e);
   }
 
-  toArray() {
-    return this.items.slice();
-  }
-}
+  if (!rentals.length) return { date, recommendations: [] };
 
-function topProductsByCount(counts, limit) {
-  const heap = new MinHeap((a, b) => {
-    if (a.score !== b.score) {
-      return a.score - b.score;
-    }
-
-    return b.productId.localeCompare(a.productId);
-  });
-
-  for (const [productId, score] of counts.entries()) {
-    const item = {
-      productId,
-      score
-    };
-
-    if (heap.size() < limit) {
-      heap.push(item);
-      continue;
-    }
-
-    const smallest = heap.peek();
-
-    if (
-      item.score > smallest.score ||
-      (item.score === smallest.score && item.productId.localeCompare(smallest.productId) < 0)
-    ) {
-      heap.pop();
-      heap.push(item);
-    }
+  const freq = {};
+  for (const r of rentals) {
+    const id = r.productId || r.product_id || r.product || r.item_id || r.itemId;
+    if (!id) continue;
+    freq[id] = (freq[id] || 0) + 1;
   }
 
-  return heap.toArray().sort((a, b) => {
-    if (b.score !== a.score) {
-      return b.score - a.score;
-    }
+  const sorted = Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, lim);
 
-    return a.productId.localeCompare(b.productId);
-  });
-}
+  const ids = sorted.map(([id]) => id);
+  if (!ids.length) return { date, recommendations: [] };
 
-function getProductId(product) {
-  if (!product || typeof product !== "object") {
-    return "";
-  }
-
-  return String(product.id || product._id || product.product_id || product.productId || "");
-}
-
-function productDetailsMapFromPayload(payload) {
-  const products = firstArrayFromPayload(payload);
-  const map = new Map();
-
-  for (const product of products) {
-    const productId = getProductId(product);
-
-    if (productId) {
-      map.set(productId, product);
-    }
-  }
-
-  return map;
-}
-
-async function fetchProductDetailsBatch(productIds) {
-  if (productIds.length === 0) {
-    return new Map();
-  }
-
-  const response = await centralApi.post(
+  const productRes = await centralApi.get(
     CENTRAL_API_PRODUCTS_BATCH_URL,
     {
-      ids: productIds,
-      productIds
-    },
-    {
-      headers: {
-        ...buildHeaders(),
-        "Content-Type": "application/json"
-      }
+      headers: buildHeaders(),
+      params: { ids: ids.join(",") }
     }
   );
 
-  if (response.status < 200 || response.status >= 300) {
-    throw createCentralApiError(response, "Unable to fetch product details");
-  }
+  const products = firstArrayFromPayload(productRes.data);
+  const productMap = {};
+  for (const p of products) productMap[p.id || p._id] = p;
 
-  return productDetailsMapFromPayload(response.data);
-}
+  const recommendations = sorted.map(([id, score]) => ({
+    productId: id,
+    name: productMap[id]?.name || productMap[id]?.title || "Unknown",
+    category: productMap[id]?.category || "Unknown",
+    score: score,
+  }));
 
-function recommendationFromProduct(item, productDetails) {
-  const product = productDetails.get(item.productId) || {};
-
-  return {
-    productId: item.productId,
-    name: product.name || product.title || product.product_name || product.productName || null,
-    category: product.category || product.category_name || product.categoryName || null,
-    score: item.score
-  };
+  return { date, recommendations };
 }
 
 app.get("/status", (req, res) => {
@@ -927,49 +566,19 @@ app.get("/analytics/surge-days", async (req, res, next) => {
   }
 });
 
-app.get("/analytics/recommendations", async (req, res, next) => {
+app.get("/analytics/recommendations", async (req, res) => {
   try {
-    const date = String(req.query.date || "").trim();
-    const targetDate = parseDateInput(date);
-    const limit = parseRecommendationLimit(req.query.limit);
-
-    if (!targetDate) {
-      return res.status(400).json({
-        error: "Bad Request",
-        message: "date must use YYYY-MM-DD format"
-      });
-    }
-
-    if (!limit) {
-      return res.status(400).json({
-        error: "Bad Request",
-        message: "limit must be an integer between 1 and 50"
-      });
-    }
-
-    const historyStart = dateFns.startOfDay(
-      dateFns.subYears(targetDate, RECOMMENDATION_HISTORY_YEARS)
-    );
-    const historyEnd = dateFns.startOfDay(dateFns.subDays(targetDate, 1));
-    const seasonalWindows = buildSeasonalWindows(targetDate, historyStart, historyEnd);
-    const rentals = await fetchRentalsForRecommendation(historyStart, historyEnd);
-    const counts = countProductsForSeasonalWindow(rentals, seasonalWindows);
-    const topProducts = topProductsByCount(counts, limit);
-    const productIds = topProducts.map((product) => product.productId);
-    const productDetails = await fetchProductDetailsBatch(productIds);
-
-    return res.json({
-      date,
-      recommendations: topProducts.map((product) =>
-        recommendationFromProduct(product, productDetails)
-      )
+    const { date, limit } = req.query;
+    const result = await getRecommendationsLogic(date, limit);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      error: "Internal Server Error",
+      message: err.message,
     });
-  } catch (error) {
-    return next(error);
   }
 });
 
-// Handle retry exhausted errors (429 after 3 retries)
 app.use(handleRetryExhausted);
 
 app.use((req, res) => {
@@ -1015,6 +624,38 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`analytics-service listening on port ${PORT}`);
+async function startServer() {
+  app.listen(PORT, () => {
+    console.log(`analytics-service listening on port ${PORT}`);
+  });
+
+  const grpcServer = new grpc.Server();
+  grpcServer.addService(rentpiProto.Analytics.service, {
+    GetRecommendations: async (call, callback) => {
+      try {
+        const { date, limit } = call.request;
+        const result = await getRecommendationsLogic(date, limit);
+        callback(null, result);
+      } catch (err) {
+        callback({
+          code: grpc.status.INTERNAL,
+          details: err.message
+        });
+      }
+    }
+  });
+
+  const GRPC_PORT = 9003;
+  grpcServer.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
+    if (err) {
+      console.error("Failed to bind gRPC server", err);
+      return;
+    }
+    console.log(`analytics-service gRPC listening on port ${port}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start analytics-service", error);
+  process.exit(1);
 });

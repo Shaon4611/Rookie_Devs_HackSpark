@@ -16,7 +16,7 @@ ENV NODE_ENV=production
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package*.json ./
-COPY server.js api-retry-utils.js ./
+COPY server.js api-retry-utils.js rentpi.proto ./
 
 EXPOSE 8003
 

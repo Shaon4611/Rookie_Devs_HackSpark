@@ -109,10 +109,11 @@ function withRetry(axiosInstance, serviceName = 'api') {
 function handleRetryExhausted(err, req, res, next) {
   // Check if this is a rate limit error after retries
   if (err.response?.status === 429) {
+    const lastRetryAfter = err.response.data?.retryAfterSeconds || parseInt(err.response.headers?.['retry-after']) || 60;
     return res.status(503).json({
-      error: 'Service Unavailable',
-      message: 'Central API rate limit exceeded. Please try again later.',
-      retryAfterSeconds: err.response.data?.retryAfterSeconds || 60
+      error: "Central API unavailable after 3 retries",
+      lastRetryAfter: lastRetryAfter,
+      suggestion: "Try again in ~2 minutes"
     });
   }
   next(err);

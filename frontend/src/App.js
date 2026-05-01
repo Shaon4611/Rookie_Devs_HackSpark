@@ -6,6 +6,7 @@ import Register from './pages/Register';
 import Products from './pages/Products';
 import Availability from './pages/Availability';
 import Chat from './pages/Chat';
+import Trending from './pages/Trending';
 import './index.css';
 
 const PrivateRoute = ({ children }) => {
@@ -35,7 +36,8 @@ const Navigation = () => {
           <>
             <Link to="/products" className="nav-link">Products</Link>
             <Link to="/availability" className="nav-link">Availability</Link>
-            <Link to="/chat" className="nav-link">Agent Chat</Link>
+            <Link to="/trending" className="nav-link">🔥 Trending</Link>
+            <Link to="/chat" className="nav-link">AI Chat</Link>
             <button 
               onClick={logout} 
               className="btn" 
@@ -78,12 +80,20 @@ const AppRoutes = () => {
               <Availability />
             </PrivateRoute>
           } />
+
+          <Route path="/trending" element={
+            <PrivateRoute>
+              <Trending />
+            </PrivateRoute>
+          } />
           
           <Route path="/chat" element={
             <PrivateRoute>
               <Chat />
             </PrivateRoute>
           } />
+
+          <Route path="*" element={<Navigate to={user ? "/products" : "/login"} />} />
         </Routes>
       </main>
     </div>
